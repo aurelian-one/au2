@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "libs/au"
+]
+resolver = "2"
+
+[workspace.dependencies]
+au = { path = "libs/au" }
