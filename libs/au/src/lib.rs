@@ -1,6 +1,4 @@
 use std::fmt::Debug;
-use std::io::Error;
-use std::io::ErrorKind;
 
 use automerge::{Automerge, ObjType, ReadDoc, Value};
 use serde::{Deserialize, Serialize};
@@ -200,12 +198,7 @@ pub fn decode_item(
 pub fn decode(source: &Automerge) -> Result<Project, Box<dyn std::error::Error>> {
     let items_node = match source.get(automerge::ROOT, "items") {
         Ok(Some((Value::Object(ObjType::Map), node))) => node,
-        _ => {
-            return Err(Box::new(Error::new(
-                ErrorKind::InvalidData,
-                "missing 'items' or is not a map",
-            )))
-        }
+        _ => return Err(Box::new(NoSuchKey(String::from("items")))),
     };
 
     let mut out = Vec::new();
