@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-time = { workspace = true, features = ["macros"] }
+time = { workspace = true, features = ["macros", "serde"] }
 automerge = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
