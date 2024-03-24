@@ -1,6 +1,9 @@
 [package]
 name = "au"
 version = "0.1.0"
-resolver = "2"
+edition = "2021"
 
 [dependencies]
+time = { workspace = true, features = ["macros"] }
+automerge = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
