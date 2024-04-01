@@ -1,17 +1,19 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::ops::Deref;
 
 use automerge::{AutoCommit, Automerge, ObjType, ScalarValue, Value};
 use automerge::ReadDoc;
 use automerge::transaction::Transactable;
 use serde::{Deserialize, Serialize};
-use time::{Date, OffsetDateTime, Time};
+use time::OffsetDateTime;
 
 use crate::decode::*;
 use crate::error::AuError;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Item {
+pub struct Item<'a> {
     // id is the unique id of the item itself.
     pub id: String,
     // at is the timestamp at which the item was created or last modified. To find a history of updates, walk through the graph of changes to this node.
@@ -21,7 +23,7 @@ pub struct Item {
     // content type is how the content should be treated. this is mandatory. text types may be rendered in the UI, while other types may only be downloaded as attachments.
     pub content_type: String,
     // content is the raw content bytes, depending on the content_type this may be utf-8 encoded text or generic bytes.
-    pub content: Vec<u8>,
+    pub content: Cow<'a, [u8]>,
     // rank is the rank of the item among its siblings (those with the same parent id). higher rank should be displayed with higher priority.
     pub rank: i64,
     // parent is the optional parent id which this item is nested under.
@@ -32,14 +34,14 @@ pub struct Item {
     pub deleted: bool,
 }
 
-impl Default for Item {
-    fn default() -> Item {
+impl<'a> Default for Item<'a> {
+    fn default() -> Item<'a> {
         return Item {
             id: "".to_string(),
-            at: OffsetDateTime::new_utc(Date::MIN, Time::MIDNIGHT),
+            at: OffsetDateTime::UNIX_EPOCH,
             class: None,
             content_type: "".to_string(),
-            content: vec![],
+            content: Cow::from(vec![]),
             rank: 0,
             deleted: false,
             parent: None,
@@ -48,13 +50,13 @@ impl Default for Item {
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
-pub struct Project {
-    pub children: HashMap<String, Item>,
+pub struct Project<'a> {
+    pub children: HashMap<String, Item<'a>>,
 }
 
-impl Project {
+impl<'a> Project<'a> {
 
-    pub fn with_item(&mut self, item: Item, doc: &mut AutoCommit) -> Result<&mut Project, Box<dyn std::error::Error>> {
+    pub fn with_item<'b: 'a>(&mut self, item: Item<'b>, doc: &mut AutoCommit) -> Result<&mut Project<'a>, Box<dyn std::error::Error>> {
         if item.id.is_empty() {
             return Err(Box::new(AuError::InvalidField("id".to_string(), "empty".to_string())))
         } else if self.children.contains_key(item.id.as_str()) {
@@ -64,18 +66,20 @@ impl Project {
                 return Err(Box::new(AuError::InvalidField("parent".to_string(), "does not exist".to_string())))
             }
         }
-        let items_node = find_items_node(doc.document())?;
+        let items_node = match find_items_node(doc.document()) {
+            Ok(n) => n,
+            Err(_) => doc.put_object(automerge::ROOT, "items", ObjType::Map)?
+        };
         let ex_id = doc.put_object(items_node, item.id.clone(), ObjType::Map)?;
         doc.put(&ex_id, "at", ScalarValue::Timestamp((item.at.unix_timestamp_nanos() / 1_000_000) as i64))?;
         doc.put(&ex_id, "content_type", ScalarValue::Str(item.content_type.clone().into()))?;
         doc.put(&ex_id, "rank", ScalarValue::Int(item.rank))?;
 
-
         if item.content_type.starts_with("text/") {
             let text_ex_id = doc.put_object(&ex_id, "content", ObjType::Text)?;
-            doc.update_text(&text_ex_id, std::str::from_utf8(item.content.as_slice())?)?
+            doc.update_text(&text_ex_id, std::str::from_utf8(item.content.deref())?)?
         } else {
-            doc.put(&ex_id, "content", ScalarValue::Bytes(item.content.clone()))?
+            doc.put(&ex_id, "content", ScalarValue::Bytes(item.content.to_vec()))?
         }
 
         if let Some(ref p) = item.parent {
@@ -87,18 +91,17 @@ impl Project {
         if item.deleted {
             doc.put(&ex_id, "deleted", ScalarValue::Boolean(true))?
         }
-
         self.children.insert(item.id.clone(), item.clone());
         return Ok(self)
     }
 
 }
 
-fn decode_item_inner(
+fn decode_item_inner<'a>(
     source: &Automerge,
     item_node: &automerge::ObjId,
     k: &str,
-) -> Result<Option<Item>, Box<dyn std::error::Error>> {
+) -> Result<Option<Item<'a>>, Box<dyn std::error::Error>> {
     let mut new_item = Item::default();
     new_item.id = k.to_string();
 
@@ -121,11 +124,11 @@ fn decode_item_inner(
     return Ok(Some(new_item));
 }
 
-pub fn decode_item(
+pub fn decode_item<'a>(
     source: &Automerge,
     items_node: &automerge::ObjId,
     k: &str,
-) -> Result<Option<Item>, Box<dyn std::error::Error>> {
+) -> Result<Option<Item<'a>>, Box<dyn std::error::Error>> {
     let item_node = match source.get(items_node, k) {
         Ok(Some((Value::Object(ObjType::Map), n))) => n,
         Ok(Some(_)) => return Err(Box::new(AuError::IncorrectType(
@@ -169,10 +172,12 @@ pub fn decode_project(source: &Automerge) -> Result<Project, Box<dyn std::error:
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use automerge::{AutoCommit, ObjType, ScalarValue};
     use automerge::transaction::Transactable;
 
-    use crate::item::{decode_item, decode_project};
+    use crate::item::{decode_item, decode_project, Item, Project};
 
     #[test]
     fn test_decode_empty() {
@@ -275,15 +280,14 @@ mod tests {
     #[test]
     fn test_decode_project_some() {
         let mut doc = AutoCommit::new();
-        let items_ex_id = doc.put_object(automerge::ROOT, "items", ObjType::Map).unwrap();
-
-        let ex_id = doc.put_object(items_ex_id, "some-id", ObjType::Map).unwrap();
-        doc.put(&ex_id, "at", ScalarValue::Timestamp(1_711_959_236_000)).unwrap();
-        doc.put(&ex_id, "content_type", ScalarValue::Str("text/markdown".into())).unwrap();
-        let content_ex_id = doc.put_object(&ex_id, "content", ObjType::Text).unwrap();
-        doc.update_text(&content_ex_id, "blah blah").unwrap();
-
+        let mut project = Project::default();
+        let mut item = Item::default();
+        item.id = "some-id".to_string();
+        item.content_type = "text/markdown".to_string();
+        item.content = Cow::from("blah blah".as_bytes());
+        project.with_item(item, &mut doc).unwrap();
         let project = decode_project(doc.document()).unwrap();
         assert_eq!(project.children.len(), 1);
+        assert!(project.children.get("some-id").is_some())
     }
 }

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use automerge::{Automerge, ObjType, Value};
 use time::OffsetDateTime;
 
@@ -88,21 +89,21 @@ pub fn decode_timestamp(
     }
 }
 
-pub fn decode_content(
+pub fn decode_content<'a>(
     source: &Automerge,
     node: &automerge::ObjId,
     k: &str,
-) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+) -> Result<Option<Cow<'a, [u8]>>, Box<dyn std::error::Error>> {
     return match source.get(node, k) {
         Ok(Some((Value::Object(ObjType::Text), node))) => match source.text(&node) {
-            Ok(v) => Ok(Some(Vec::from(v))),
+            Ok(v) =>  Ok(Some(Cow::from(v.as_bytes().to_vec()))),
             Err(_) => Err(Box::new(AuError::IncorrectType(
                 String::from(k),
                 String::from("text"),
             ))),
         },
         Ok(Some((Value::Scalar(value), _))) => match value.to_bytes() {
-            Some(b) => Ok(Some(Vec::from(b))),
+            Some(b) => Ok(Some(Cow::from(b.to_vec()))),
             None => Err(Box::new(AuError::IncorrectType(
                 String::from(k),
                 String::from("text"),
