@@ -14,6 +14,7 @@ version = "0.1.0"
 dependencies = [
  "automerge",
  "serde",
+ "smol_str",
  "thiserror",
  "time",
 ]
