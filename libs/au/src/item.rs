@@ -204,73 +204,70 @@ impl Project {
                 // Updating the rank means a new int value
                 ItemUpdate::Rank(new_rank) => {
                     new_item.rank = *new_rank;
-                    doc.put(
-                        &item_node,
-                        DOC_ITEM_RANK_NODE,
-                        ScalarValue::Int(*new_rank),
-                    )?;
+                    doc.put(&item_node, DOC_ITEM_RANK_NODE, ScalarValue::Int(*new_rank))?;
                 }
                 // Updating the class to nothing is just deleting the class node
                 ItemUpdate::Class(None) => {
                     new_item.class = None;
-                    doc.delete(
-                        &item_node,
-                        DOC_ITEM_CLASS_NODE,
-                    )?;
+                    doc.delete(&item_node, DOC_ITEM_CLASS_NODE)?;
                 }
                 // While updating it is a write
                 ItemUpdate::Class(Some(new_class)) => {
                     new_item.class = Some(Rc::from(new_class.as_ref()));
-                    doc.put(
-                        &item_node,
-                        DOC_ITEM_CLASS_NODE,
-                        new_class.as_ref()
-                    )?;
+                    doc.put(&item_node, DOC_ITEM_CLASS_NODE, new_class.as_ref())?;
                 }
                 // Updating content and content type are the most complex.. for good reasons
                 ItemUpdate::Content(new_content_type, new_content) => {
                     // updating the content type is easy
-                    new_item.content_type = Rc::from(new_content_type.as_ref());
-                    doc.put(
-                        &item_node,
-                        DOC_ITEM_CONTENT_TYPE_NODE,
-                        new_content_type.as_ref()
-                    )?;
-                    // updating the content is more complex
-                    new_item.content = Rc::from(new_content.as_ref());
-                    // if both nodes are text we can attempt a splice
-                    if new_item.content_type.starts_with(CONTENT_TYPE_TEXT_PREFIX) {
-                        let new_content_str = std::str::from_utf8(new_content.as_ref())?;
-                        match doc.get(&item_node, DOC_ITEM_CONTENT_NODE) {
-                            Ok(Some((Value::Object(ObjType::Text), node))) => match doc.text(&node) {
-                                Ok(old_content_str) => {
-                                    // calculate the slice partition
-                                    let common_prefix_length = common_prefix(new_content_str.as_bytes(), old_content_str.as_bytes());
-                                    let common_suffix_length = common_suffix(new_content_str[common_prefix_length..].as_bytes(), old_content_str[common_prefix_length..].as_bytes());
-                                    if common_prefix_length > 0 || common_suffix_length > 0 {
-                                        let del_len = old_content_str.len() - common_prefix_length - common_suffix_length;
-                                        let new_end = new_content_str.len() - common_suffix_length;
-                                        doc.splice_text(
-                                            node,
-                                            common_prefix_length,
-                                            del_len as isize,
-                                            &new_content_str[common_prefix_length..new_end],
-                                        )?
-                                    } else {
-                                        doc.update_text(&node, new_content_str)?
+                    if new_item.content_type.as_ref() != new_content_type.as_ref() {
+                        new_item.content_type = Rc::from(new_content_type.as_ref());
+                        doc.put(&item_node, DOC_ITEM_CONTENT_TYPE_NODE, new_content_type.as_ref())?;
+                    }
+                    if new_item.content.as_ref() != new_content.as_ref() {
+                        // updating the content is more complex
+                        new_item.content = Rc::from(new_content.as_ref());
+                        // if both nodes are text we can attempt a splice
+                        if new_item.content_type.starts_with(CONTENT_TYPE_TEXT_PREFIX) {
+                            let new_content_str = std::str::from_utf8(new_content.as_ref())?;
+                            match doc.get(&item_node, DOC_ITEM_CONTENT_NODE) {
+                                Ok(Some((Value::Object(ObjType::Text), node))) => match doc.text(&node) {
+                                    Ok(old_content_str) => {
+                                        // calculate the slice partition
+                                        let common_prefix_length = common_prefix(new_content_str.as_bytes(), old_content_str.as_bytes());
+                                        let common_suffix_length = common_suffix(
+                                            new_content_str[common_prefix_length..].as_bytes(),
+                                            old_content_str[common_prefix_length..].as_bytes(),
+                                        );
+                                        if common_prefix_length > 0 || common_suffix_length > 0 {
+                                            let del_len = old_content_str.len() - common_prefix_length - common_suffix_length;
+                                            let new_end = new_content_str.len() - common_suffix_length;
+                                            doc.splice_text(
+                                                node,
+                                                common_prefix_length,
+                                                del_len as isize,
+                                                &new_content_str[common_prefix_length..new_end],
+                                            )?
+                                        } else {
+                                            doc.update_text(&node, new_content_str)?
+                                        }
+                                    }
+                                    Err(_) => {
+                                        return Err(Box::new(AuError::IncorrectType(
+                                            Box::from(DOC_ITEM_CONTENT_NODE),
+                                            Box::from("text"),
+                                        )))
                                     }
                                 },
-                                Err(_) => return Err(Box::new(AuError::IncorrectType(Box::from(DOC_ITEM_CONTENT_NODE), Box::from("text")))),
-                            },
-                            _ => {
-                                // if splice is not possible just write it directly
-                                let text_ex_id = doc.put_object(&item_node, DOC_ITEM_CONTENT_NODE, ObjType::Text)?;
-                                doc.update_text(&text_ex_id, new_content_str)?
-                            },
+                                _ => {
+                                    // if splice is not possible just write it directly
+                                    let text_ex_id = doc.put_object(&item_node, DOC_ITEM_CONTENT_NODE, ObjType::Text)?;
+                                    doc.update_text(&text_ex_id, new_content_str)?
+                                }
+                            }
+                        } else {
+                            // fallback to an entire new node
+                            doc.put(&item_node, DOC_ITEM_CONTENT_NODE, ScalarValue::Bytes(new_content.to_vec()))?
                         }
-                    } else {
-                        // fallback to an entire new node
-                        doc.put(&item_node, DOC_ITEM_CONTENT_NODE, ScalarValue::Bytes(new_content.to_vec()))?
                     }
                 }
             }
@@ -296,9 +293,9 @@ impl Project {
     }
 
     pub fn get_item(&self, id: &str) -> Option<Rc<Item>> {
-        return self.children.get(id).map(|t| t.clone())
+        return self.children.get(id).map(|t| t.clone());
     }
-    
+
     pub fn list_children(&self, parent: Option<&str>) -> Vec<Rc<Item>> {
         let mut out: Vec<Rc<Item>> = Vec::new();
         for (_, v) in self.children.iter() {
@@ -391,19 +388,20 @@ pub fn decode_project(source: &Automerge) -> Result<Project, Box<dyn std::error:
 fn common_prefix(a: &[u8], b: &[u8]) -> usize {
     let offset = iter::zip(a.chunks_exact(128), b.chunks_exact(128))
         .take_while(|(ac, bc)| ac == bc)
-        .count() * 128;
-    offset + iter::zip(&a[offset..], &b[offset..])
-        .take_while(|(aa, bb)| aa == bb)
         .count()
+        * 128;
+    offset + iter::zip(&a[offset..], &b[offset..]).take_while(|(aa, bb)| aa == bb).count()
 }
 
 fn common_suffix(a: &[u8], b: &[u8]) -> usize {
     let offset = iter::zip(a.rchunks_exact(128), b.rchunks_exact(128))
         .take_while(|(ac, bc)| ac == bc)
-        .count() * 128;
-    offset + iter::zip(a[..a.len() - offset].iter().rev(), b[..b.len() - offset].iter().rev())
-        .take_while(|(aa, bb)| aa == bb)
         .count()
+        * 128;
+    offset
+        + iter::zip(a[..a.len() - offset].iter().rev(), b[..b.len() - offset].iter().rev())
+            .take_while(|(aa, bb)| aa == bb)
+            .count()
 }
 
 #[cfg(test)]
@@ -413,7 +411,7 @@ mod tests {
     use automerge::transaction::Transactable;
     use automerge::{AutoCommit, ObjType, ScalarValue};
 
-    use crate::item::{common_prefix, common_suffix, CONTENT_TYPE_DEFAULT, decode_item, decode_project, Item, ItemUpdate, Project};
+    use crate::item::{common_prefix, common_suffix, decode_item, decode_project, Item, ItemUpdate, Project, CONTENT_TYPE_DEFAULT};
 
     #[test]
     fn test_decode_empty() {
@@ -606,28 +604,68 @@ mod tests {
         project.with_item(&item_a, &mut doc).unwrap();
         doc.commit().unwrap();
 
-        project.with_updated_item("item-a", &[
-            ItemUpdate::Content(Box::from(CONTENT_TYPE_DEFAULT), Box::from("hello world".as_bytes())),
-        ], &mut doc).unwrap();
-        assert_eq!(project.get_item("item-a").unwrap().clone().content.clone().as_ref(), "hello world".as_bytes());
+        project
+            .with_updated_item(
+                "item-a",
+                &[ItemUpdate::Content(
+                    Box::from(CONTENT_TYPE_DEFAULT),
+                    Box::from("hello world".as_bytes()),
+                )],
+                &mut doc,
+            )
+            .unwrap();
+        assert_eq!(
+            project.get_item("item-a").unwrap().clone().content.clone().as_ref(),
+            "hello world".as_bytes()
+        );
         doc.commit().unwrap();
 
-        project.with_updated_item("item-a", &[
-            ItemUpdate::Content(Box::from(CONTENT_TYPE_DEFAULT), Box::from("hello another world".as_bytes())),
-        ], &mut doc).unwrap();
-        assert_eq!(project.get_item("item-a").unwrap().clone().content.clone().as_ref(), "hello another world".as_bytes());
+        project
+            .with_updated_item(
+                "item-a",
+                &[ItemUpdate::Content(
+                    Box::from(CONTENT_TYPE_DEFAULT),
+                    Box::from("hello another world".as_bytes()),
+                )],
+                &mut doc,
+            )
+            .unwrap();
+        assert_eq!(
+            project.get_item("item-a").unwrap().clone().content.clone().as_ref(),
+            "hello another world".as_bytes()
+        );
         doc.commit().unwrap();
 
-        project.with_updated_item("item-a", &[
-            ItemUpdate::Content(Box::from(CONTENT_TYPE_DEFAULT), Box::from("hello another planet".as_bytes())),
-        ], &mut doc).unwrap();
-        assert_eq!(project.get_item("item-a").unwrap().clone().content.clone().as_ref(), "hello another planet".as_bytes());
+        project
+            .with_updated_item(
+                "item-a",
+                &[ItemUpdate::Content(
+                    Box::from(CONTENT_TYPE_DEFAULT),
+                    Box::from("hello another planet".as_bytes()),
+                )],
+                &mut doc,
+            )
+            .unwrap();
+        assert_eq!(
+            project.get_item("item-a").unwrap().clone().content.clone().as_ref(),
+            "hello another planet".as_bytes()
+        );
         doc.commit().unwrap();
 
-        project.with_updated_item("item-a", &[
-            ItemUpdate::Content(Box::from(CONTENT_TYPE_DEFAULT), Box::from("goodbye another planet".as_bytes())),
-        ], &mut doc).unwrap();
-        assert_eq!(project.get_item("item-a").unwrap().clone().content.clone().as_ref(), "goodbye another planet".as_bytes());
+        project
+            .with_updated_item(
+                "item-a",
+                &[ItemUpdate::Content(
+                    Box::from(CONTENT_TYPE_DEFAULT),
+                    Box::from("goodbye another planet".as_bytes()),
+                )],
+                &mut doc,
+            )
+            .unwrap();
+        assert_eq!(
+            project.get_item("item-a").unwrap().clone().content.clone().as_ref(),
+            "goodbye another planet".as_bytes()
+        );
         doc.commit().unwrap();
 
         let changes = doc.get_changes(&[]);
@@ -641,7 +679,10 @@ mod tests {
         assert_eq!(common_prefix("a".as_ref(), "".as_ref()), 0);
         assert_eq!(common_prefix("a".as_ref(), "a".as_ref()), 1);
         assert_eq!(common_prefix("a".as_ref(), "b".as_ref()), 0);
-        assert_eq!(common_prefix("helloworld".repeat(20).as_ref(), "helloworld".repeat(21).as_ref()), 20*10);
+        assert_eq!(
+            common_prefix("helloworld".repeat(20).as_ref(), "helloworld".repeat(21).as_ref()),
+            20 * 10
+        );
     }
 
     #[test]
@@ -650,7 +691,10 @@ mod tests {
         assert_eq!(common_suffix("".as_ref(), "a".as_ref()), 0);
         assert_eq!(common_suffix("a".as_ref(), "".as_ref()), 0);
         assert_eq!(common_suffix("a".as_ref(), "b".as_ref()), 0);
-        assert_eq!(common_suffix("helloworld".repeat(20).as_ref(), "helloworld".repeat(21).as_ref()), 20*10);
+        assert_eq!(
+            common_suffix("helloworld".repeat(20).as_ref(), "helloworld".repeat(21).as_ref()),
+            20 * 10
+        );
         assert_eq!(common_suffix("a".as_ref(), "a".as_ref()), 1);
     }
 }

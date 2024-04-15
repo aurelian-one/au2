@@ -6,8 +6,8 @@ resolver = "2"
 
 [workspace.dependencies]
 au = { path = "libs/au" }
-automerge = { version = "0.5.9", default-features = false }
-serde = { version = "1.0.197", default-features = false, features = ["rc"] }
-smol_str = { version = "0.2.1", default-features = false }
+automerge = { version = "0.5", default-features = false }
+serde = { version = "1.0", default-features = false, features = ["rc"] }
+smol_str = { version = "0.2", default-features = false }
 time = {  version = "0.3", default-features = false }
-thiserror = { version = "1.0.58", default-features = false }
+thiserror = { version = "1.0", default-features = false }
