@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::iter;
 use std::rc::Rc;
 
 use automerge::transaction::Transactable;
@@ -22,7 +23,7 @@ const DOC_ITEM_CONTENT_TYPE_NODE: &str = "content_type";
 const DOC_ITEM_RANK_NODE: &str = "rank";
 const DOC_ITEM_CLASS_NODE: &str = "class";
 const CONTENT_TYPE_DEFAULT: &str = "text/plain";
-const CONTENT_TYPE_DEFAULT_PREFIX: &str = "text/";
+const CONTENT_TYPE_TEXT_PREFIX: &str = "text/";
 
 // An Item is an item in the hierarchy. We use reference counted strings to avoid specifying lifetimes.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -103,7 +104,7 @@ impl Project {
         )?;
         doc.put(&ex_id, DOC_ITEM_RANK_NODE, ScalarValue::Int(item.rank))?;
 
-        if item.content_type.starts_with(CONTENT_TYPE_DEFAULT_PREFIX) {
+        if item.content_type.starts_with(CONTENT_TYPE_TEXT_PREFIX) {
             let text_ex_id = doc.put_object(&ex_id, DOC_ITEM_CONTENT_NODE, ObjType::Text)?;
             doc.update_text(&text_ex_id, std::str::from_utf8(item.content.as_ref())?)?
         } else {
@@ -163,13 +164,17 @@ impl Project {
 
         for update in updates {
             match update {
+                // Updating the parent to nothing means deleting the parent node
                 ItemUpdate::Parent(None) => {
                     if let Some(_) = new_item.parent {
                         new_item.parent = None;
                         doc.delete(&item_node, DOC_ITEM_PARENT_NODE)?;
                     }
                 }
+                // Updating the parent to a real value requires checking that the target exists
+                // and that there are no cycles and then performing the update
                 ItemUpdate::Parent(Some(ref new_parent)) => {
+                    // cycle detect
                     let mut current_item_id: Box<str> = new_parent.clone();
                     loop {
                         match self.children.get(current_item_id.as_ref()) {
@@ -188,7 +193,7 @@ impl Project {
                             }
                         };
                     }
-
+                    // update
                     new_item.parent = Some(Rc::from(new_parent.as_ref()));
                     doc.put(
                         &item_node,
@@ -196,12 +201,81 @@ impl Project {
                         ScalarValue::Str(SmolStr::from(new_parent.clone())),
                     )?;
                 }
-                ItemUpdate::Rank(_) => {}
-                ItemUpdate::Class(_) => {}
-                ItemUpdate::Content(_, _) => {}
+                // Updating the rank means a new int value
+                ItemUpdate::Rank(new_rank) => {
+                    new_item.rank = *new_rank;
+                    doc.put(
+                        &item_node,
+                        DOC_ITEM_RANK_NODE,
+                        ScalarValue::Int(*new_rank),
+                    )?;
+                }
+                // Updating the class to nothing is just deleting the class node
+                ItemUpdate::Class(None) => {
+                    new_item.class = None;
+                    doc.delete(
+                        &item_node,
+                        DOC_ITEM_CLASS_NODE,
+                    )?;
+                }
+                // While updating it is a write
+                ItemUpdate::Class(Some(new_class)) => {
+                    new_item.class = Some(Rc::from(new_class.as_ref()));
+                    doc.put(
+                        &item_node,
+                        DOC_ITEM_CLASS_NODE,
+                        new_class.as_ref()
+                    )?;
+                }
+                // Updating content and content type are the most complex.. for good reasons
+                ItemUpdate::Content(new_content_type, new_content) => {
+                    // updating the content type is easy
+                    new_item.content_type = Rc::from(new_content_type.as_ref());
+                    doc.put(
+                        &item_node,
+                        DOC_ITEM_CONTENT_TYPE_NODE,
+                        new_content_type.as_ref()
+                    )?;
+                    // updating the content is more complex
+                    new_item.content = Rc::from(new_content.as_ref());
+                    // if both nodes are text we can attempt a splice
+                    if new_item.content_type.starts_with(CONTENT_TYPE_TEXT_PREFIX) {
+                        let new_content_str = std::str::from_utf8(new_content.as_ref())?;
+                        match doc.get(&item_node, DOC_ITEM_CONTENT_NODE) {
+                            Ok(Some((Value::Object(ObjType::Text), node))) => match doc.text(&node) {
+                                Ok(old_content_str) => {
+                                    // calculate the slice partition
+                                    let common_prefix_length = common_prefix(new_content_str.as_bytes(), old_content_str.as_bytes());
+                                    let common_suffix_length = common_suffix(new_content_str[common_prefix_length..].as_bytes(), old_content_str[common_prefix_length..].as_bytes());
+                                    if common_prefix_length > 0 || common_suffix_length > 0 {
+                                        let del_len = old_content_str.len() - common_prefix_length - common_suffix_length;
+                                        let new_end = new_content_str.len() - common_suffix_length;
+                                        doc.splice_text(
+                                            node,
+                                            common_prefix_length,
+                                            del_len as isize,
+                                            &new_content_str[common_prefix_length..new_end],
+                                        )?
+                                    } else {
+                                        doc.update_text(&node, new_content_str)?
+                                    }
+                                },
+                                Err(_) => return Err(Box::new(AuError::IncorrectType(Box::from(DOC_ITEM_CONTENT_NODE), Box::from("text")))),
+                            },
+                            _ => {
+                                // if splice is not possible just write it directly
+                                let text_ex_id = doc.put_object(&item_node, DOC_ITEM_CONTENT_NODE, ObjType::Text)?;
+                                doc.update_text(&text_ex_id, new_content_str)?
+                            },
+                        }
+                    } else {
+                        // fallback to an entire new node
+                        doc.put(&item_node, DOC_ITEM_CONTENT_NODE, ScalarValue::Bytes(new_content.to_vec()))?
+                    }
+                }
             }
         }
-
+        // insert the new child node
         self.children.insert(Box::from(id), Rc::from(new_item));
         Ok(self)
     }
@@ -221,6 +295,10 @@ impl Project {
         return false;
     }
 
+    pub fn get_item(&self, id: &str) -> Option<Rc<Item>> {
+        return self.children.get(id).map(|t| t.clone())
+    }
+    
     pub fn list_children(&self, parent: Option<&str>) -> Vec<Rc<Item>> {
         let mut out: Vec<Rc<Item>> = Vec::new();
         for (_, v) in self.children.iter() {
@@ -310,6 +388,24 @@ pub fn decode_project(source: &Automerge) -> Result<Project, Box<dyn std::error:
     return Ok(Project { children: out });
 }
 
+fn common_prefix(a: &[u8], b: &[u8]) -> usize {
+    let offset = iter::zip(a.chunks_exact(128), b.chunks_exact(128))
+        .take_while(|(ac, bc)| ac == bc)
+        .count() * 128;
+    offset + iter::zip(&a[offset..], &b[offset..])
+        .take_while(|(aa, bb)| aa == bb)
+        .count()
+}
+
+fn common_suffix(a: &[u8], b: &[u8]) -> usize {
+    let offset = iter::zip(a.rchunks_exact(128), b.rchunks_exact(128))
+        .take_while(|(ac, bc)| ac == bc)
+        .count() * 128;
+    offset + iter::zip(a[..a.len() - offset].iter().rev(), b[..b.len() - offset].iter().rev())
+        .take_while(|(aa, bb)| aa == bb)
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use std::rc::Rc;
@@ -317,7 +413,7 @@ mod tests {
     use automerge::transaction::Transactable;
     use automerge::{AutoCommit, ObjType, ScalarValue};
 
-    use crate::item::{decode_item, decode_project, Item, ItemUpdate, Project};
+    use crate::item::{common_prefix, common_suffix, CONTENT_TYPE_DEFAULT, decode_item, decode_project, Item, ItemUpdate, Project};
 
     #[test]
     fn test_decode_empty() {
@@ -497,5 +593,64 @@ mod tests {
         assert_eq!(project.list_children(None).len(), 1);
         assert_eq!(project.list_children(Some("item-a")).len(), 0);
         assert_eq!(project.list_children(Some("item-b")).len(), 1);
+    }
+
+    #[test]
+    fn test_content_updates() {
+        let mut doc = AutoCommit::new();
+        let mut project = Project::default();
+
+        // seed with an initial item
+        let mut item_a = Item::default();
+        item_a.id = Rc::from("item-a");
+        project.with_item(&item_a, &mut doc).unwrap();
+        doc.commit().unwrap();
+
+        project.with_updated_item("item-a", &[
+            ItemUpdate::Content(Box::from(CONTENT_TYPE_DEFAULT), Box::from("hello world".as_bytes())),
+        ], &mut doc).unwrap();
+        assert_eq!(project.get_item("item-a").unwrap().clone().content.clone().as_ref(), "hello world".as_bytes());
+        doc.commit().unwrap();
+
+        project.with_updated_item("item-a", &[
+            ItemUpdate::Content(Box::from(CONTENT_TYPE_DEFAULT), Box::from("hello another world".as_bytes())),
+        ], &mut doc).unwrap();
+        assert_eq!(project.get_item("item-a").unwrap().clone().content.clone().as_ref(), "hello another world".as_bytes());
+        doc.commit().unwrap();
+
+        project.with_updated_item("item-a", &[
+            ItemUpdate::Content(Box::from(CONTENT_TYPE_DEFAULT), Box::from("hello another planet".as_bytes())),
+        ], &mut doc).unwrap();
+        assert_eq!(project.get_item("item-a").unwrap().clone().content.clone().as_ref(), "hello another planet".as_bytes());
+        doc.commit().unwrap();
+
+        project.with_updated_item("item-a", &[
+            ItemUpdate::Content(Box::from(CONTENT_TYPE_DEFAULT), Box::from("goodbye another planet".as_bytes())),
+        ], &mut doc).unwrap();
+        assert_eq!(project.get_item("item-a").unwrap().clone().content.clone().as_ref(), "goodbye another planet".as_bytes());
+        doc.commit().unwrap();
+
+        let changes = doc.get_changes(&[]);
+        assert_eq!(changes.len(), 5);
+    }
+
+    #[test]
+    fn test_common_prefix() {
+        assert_eq!(common_prefix("".as_ref(), "".as_ref()), 0);
+        assert_eq!(common_prefix("".as_ref(), "a".as_ref()), 0);
+        assert_eq!(common_prefix("a".as_ref(), "".as_ref()), 0);
+        assert_eq!(common_prefix("a".as_ref(), "a".as_ref()), 1);
+        assert_eq!(common_prefix("a".as_ref(), "b".as_ref()), 0);
+        assert_eq!(common_prefix("helloworld".repeat(20).as_ref(), "helloworld".repeat(21).as_ref()), 20*10);
+    }
+
+    #[test]
+    fn test_common_suffix() {
+        assert_eq!(common_suffix("".as_ref(), "".as_ref()), 0);
+        assert_eq!(common_suffix("".as_ref(), "a".as_ref()), 0);
+        assert_eq!(common_suffix("a".as_ref(), "".as_ref()), 0);
+        assert_eq!(common_suffix("a".as_ref(), "b".as_ref()), 0);
+        assert_eq!(common_suffix("helloworld".repeat(20).as_ref(), "helloworld".repeat(21).as_ref()), 20*10);
+        assert_eq!(common_suffix("a".as_ref(), "a".as_ref()), 1);
     }
 }
