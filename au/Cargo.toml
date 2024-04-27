@@ -7,5 +7,7 @@ edition = "2021"
 time = { workspace = true, default-features = false, features = ["std", "macros", "serde"] }
 automerge = { workspace = true, default-features = false, features = [] }
 serde = { workspace = true, default-features = false, features = ["std", "derive"] }
-smol_str = { workspace = true, default-features = false }
+smol_str = { workspace = true, default-features = false, features = [] }
 thiserror = { workspace = true, default-features = false, features = [] }
+sqids = { workspace = true, default-features = false, features = [] }
+rand = { workspace = true, default-features = false, features = ["std", "std_rng"] }

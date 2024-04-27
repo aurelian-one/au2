@@ -28,7 +28,7 @@ const CONTENT_TYPE_TEXT_PREFIX: &str = "text/";
 // An Item is an item in the hierarchy. We use reference counted strings to avoid specifying lifetimes.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Item {
-    // id is the unique id of the item itself.
+    // id is the unique id of the item itself. This should be a uuid or otherwise short string that is _DEFINITELY_ unique.
     pub id: Rc<str>,
     // at is the timestamp at which the item was created or last modified. To find a history of updates, walk through the graph of changes to this node.
     pub at: OffsetDateTime,
@@ -44,10 +44,38 @@ pub struct Item {
     pub parent: Option<Rc<str>>,
 }
 
+impl Item {
+    pub fn summary(&self, width: usize) -> Box<str> {
+        if self.content_type.starts_with(CONTENT_TYPE_TEXT_PREFIX) {
+            if let Ok(mut as_str) = std::str::from_utf8(self.content.as_ref()) {
+                as_str = as_str.trim();
+                if as_str.len() > 0 {
+                    let first_line = match as_str.find('\n') {
+                        Some(s) => &as_str[..s],
+                        None => as_str,
+                    };
+                    return if first_line.len() <= width {
+                        Box::from(first_line)
+                    } else if width < 3 {
+                        Box::from(&first_line[..width])
+                    } else {
+                        let mut s = String::from(&first_line[..width-3]);
+                        s.push_str("...");
+                        Box::from(s.as_str())
+                    }
+                }
+            }
+            Box::from(format!("(text {} file of {} bytes)", self.content_type, self.content.len()))
+        } else {
+            Box::from(format!("(binary {} file of {} bytes)", self.content_type, self.content.len()))
+        }
+    }
+}
+
 impl Default for Item {
     fn default() -> Item {
         return Item {
-            id: Rc::from("default"),
+            id: Rc::from(""),
             at: OffsetDateTime::UNIX_EPOCH,
             class: None,
             content_type: Rc::from(CONTENT_TYPE_DEFAULT),
@@ -347,7 +375,7 @@ fn decode_item_inner(source: &Automerge, item_node: &automerge::ObjId, k: &str) 
     return Ok(Some(new_item));
 }
 
-pub fn decode_item(source: &Automerge, items_node: &automerge::ObjId, k: &str) -> Result<Option<Item>, Box<dyn std::error::Error>> {
+fn decode_item(source: &Automerge, items_node: &automerge::ObjId, k: &str) -> Result<Option<Item>, Box<dyn std::error::Error>> {
     let item_node = match source.get(items_node, k) {
         Ok(Some((Value::Object(ObjType::Map), n))) => n,
         Ok(Some(_)) => return Err(Box::new(AuError::IncorrectType(Box::from(k), Box::from("map")))),

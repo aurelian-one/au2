@@ -1,0 +1,10 @@
+[package]
+name = "aui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+au = { path = "../au" }
+automerge = { workspace = true, default-features = false, features = [] }
+crossterm = { workspace = true, default-features = true }
+ratatui = { workspace = true, default-features = true }

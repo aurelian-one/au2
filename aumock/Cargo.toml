@@ -1,0 +1,10 @@
+[package]
+name = "aumock"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+au = { path = "../au" }
+lipsum = { workspace = true, default-features = false, features = [] }
+rand = { workspace = true, default-features = false, features = ["std", "std_rng"] }
+automerge = { workspace = true, default-features = false, features = [] }
